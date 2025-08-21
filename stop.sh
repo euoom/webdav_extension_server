@@ -2,7 +2,7 @@
 
 echo "Stopping server..."
 
-if [ ! -f server.pid ]; then
+if [ ! -f .server.pid ]; then
     echo "PID file not found. Is the server running?"
     exit 1
 fi
@@ -19,5 +19,5 @@ if ps -p $PID > /dev/null; then
    kill -9 $PID
 fi
 
-rm server.pid
+rm .server.pid
 echo "Server stopped."
