@@ -8,6 +8,8 @@ from jose import JWTError, jwt
 from datetime import datetime, timedelta
 from typing import Annotated, Optional
 import logging
+from pathspec import PathSpec
+from pathspec.patterns import GitWildMatchPattern
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -107,12 +109,12 @@ async def execute_command(command: str, _current_user: Annotated[dict, Depends(g
     return _run_local_command(command)
 
 @router.post("/search_text", operation_id="extension__search_text")
-async def search_text(path: str = Query("/"), query: str = "", _current_user: Annotated[dict, Depends(get_current_user)]) -> str:
+async def search_text(current_user: Annotated[dict, Depends(get_current_user)], path: str = Query("/"), query: str = "") -> str:
     """Searches for files containing a specific text query on the NAS server using 'grep'."""
     if not query:
         raise HTTPException(status_code=400, detail="Search query cannot be empty.")
     
-    escaped_query = query.replace("'", "'\\'\''")
+    escaped_query = query.replace("'", "'\\''")
     command = f"grep -rl '{escaped_query}' {path}"
     
     try:
@@ -129,7 +131,7 @@ async def search_text(path: str = Query("/"), query: str = "", _current_user: An
         raise HTTPException(status_code=500, detail=f"Error during local search_text operation: {e}")
 
 @router.post("/find_files", operation_id="extension__find_files")
-async def find_files(path: str = Query("/"), pattern: str = "", _current_user: Annotated[dict, Depends(get_current_user)]) -> str:
+async def find_files(current_user: Annotated[dict, Depends(get_current_user)], path: str = Query("/"), pattern: str = "") -> str:
     """Finds files matching a pattern on the NAS server using 'find'."""
     if not pattern:
         raise HTTPException(status_code=400, detail="File pattern cannot be empty.")
@@ -149,8 +151,6 @@ async def find_files(path: str = Query("/"), pattern: str = "", _current_user: A
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during local find_files operation: {e}")
 
-from pathspec import PathSpec
-from pathspec.patterns import GitWildMatchPattern
 
 def _get_gitignore_patterns(repo_path: str) -> PathSpec:
     """Fetches and parses .gitignore content from the local file system."""
@@ -176,7 +176,7 @@ def _get_git_tree_info(repo_path: str, gitignore_spec: PathSpec) -> list[dict]:
     
     file_info = []
     for p in filtered_paths:
-        date_command = f"git -C {repo_path} log -1 --format=\"%cd\" --date=format:\\"%Y-%m-%d %H:%M:%S\\" -- \"{p}\""
+        date_command = f'git -C {repo_path} log -1 --format="%cd" --date=format:"%Y-%m-%d %H:%M:%S" -- "{p}"'
         last_modified = _run_local_command(date_command, repo_path)
         
         is_dir_command = f"git -C {repo_path} ls-tree HEAD \"{p}\""
@@ -222,7 +222,7 @@ def _format_tree_output(file_info: list[dict], terminal_width: int = 80) -> str:
             if isinstance(item, dict) and "is_dir" in item and not item["is_dir"]:
                 available_space = terminal_width - len(line_content)
                 if available_space > 0:
-                    padding = " " * max(1, available_space - len(last_modified_str))
+                    padding = " " * max(1, available_space - len(last_modified_str)) 
                     line_content += f"{padding}{last_modified_str}"
 
             tree_lines.append(line_content)
@@ -238,9 +238,9 @@ def _format_tree_output(file_info: list[dict], terminal_width: int = 80) -> str:
 
 @router.post("/directory_tree", operation_id="extension__directory_tree")
 async def directory_tree(
+    current_user: Annotated[dict, Depends(get_current_user)],
     path: str = Query("/"),
-    terminal_width: int = 80,
-    _current_user: Annotated[dict, Depends(get_current_user)]
+    terminal_width: int = 80
 ) -> str:
     """
     Generates a directory tree for a Git repository on the NAS server,
