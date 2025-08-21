@@ -20,6 +20,12 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
+# WEBDAV_ROOT_DIR 환경 변수 로드
+WEBDAV_ROOT_DIR = os.getenv("WEBDAV_ROOT_DIR", "/")
+if not os.path.isabs(WEBDAV_ROOT_DIR):
+    logger.warning(f"WEBDAV_ROOT_DIR is not an absolute path: {WEBDAV_ROOT_DIR}. Defaulting to '/'.")
+    WEBDAV_ROOT_DIR = "/"
+
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/extension/token")
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
@@ -70,7 +76,7 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
 
 router = APIRouter(prefix="/extension", tags=["Extension Tools"])
 
-def _run_local_command(command: str, cwd: str = "/") -> str:
+def _run_local_command(command: str, cwd: str = WEBDAV_ROOT_DIR) -> str:
     try:
         result = subprocess.run(
             command,
@@ -113,19 +119,30 @@ async def search_text(current_user: Annotated[dict, Depends(get_current_user)], 
     """Searches for files containing a specific text query on the NAS server using 'grep'."""
     if not query:
         raise HTTPException(status_code=400, detail="Search query cannot be empty.")
+
+    full_path = os.path.join(WEBDAV_ROOT_DIR, path.lstrip('/'))
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail=f"Path '{path}' not found on NAS server.")
     
     escaped_query = query.replace("'", "'\\''")
-    command = f"grep -rl '{escaped_query}' {path}"
+    # _run_local_command의 cwd가 WEBDAV_ROOT_DIR로 설정되어 있으므로, command의 path는 상대 경로로 전달해야 함
+    relative_path_for_command = os.path.relpath(full_path, start=WEBDAV_ROOT_DIR)
+    if relative_path_for_command == ".": # 루트 디렉토리인 경우
+        command = f"grep -rl '{escaped_query}' ."
+    else:
+        command = f"grep -rl '{escaped_query}' {relative_path_for_command}"
     
     try:
-        output = _run_local_command(command, path)
+        output = _run_local_command(command) # cwd는 이미 WEBDAV_ROOT_DIR로 설정됨
         found_files = output.split('\n') if output else []
-        return json.dumps([f for f in found_files if f], ensure_ascii=False)
+        # 반환되는 경로도 WEBDAV_ROOT_DIR 기준이므로, 다시 상대 경로로 변환
+        relative_found_files = [os.path.relpath(f, start=WEBDAV_ROOT_DIR) for f in found_files]
+        return json.dumps([f for f in relative_found_files if f], ensure_ascii=False)
     except HTTPException as e:
         if "Command execution failed" in e.detail and "No such file or directory" in e.detail:
             raise HTTPException(status_code=404, detail=f"Path '{path}' not found on NAS server.")
         if "Command execution failed" in e.detail and "returned non-zero exit status 1" in e.detail:
-            return json.dumps([], ensure_ascii=False)
+            return json.dumps([], ensure_ascii=False) # 검색 결과가 없는 경우
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during local search_text operation: {e}")
@@ -135,26 +152,37 @@ async def find_files(current_user: Annotated[dict, Depends(get_current_user)], p
     """Finds files matching a pattern on the NAS server using 'find'."""
     if not pattern:
         raise HTTPException(status_code=400, detail="File pattern cannot be empty.")
+
+    full_path = os.path.join(WEBDAV_ROOT_DIR, path.lstrip('/'))
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail=f"Path '{path}' not found on NAS server.")
     
-    command = f"find {path} -name '{pattern}'"
+    # _run_local_command의 cwd가 WEBDAV_ROOT_DIR로 설정되어 있으므로, command의 path는 상대 경로로 전달해야 함
+    relative_path_for_command = os.path.relpath(full_path, start=WEBDAV_ROOT_DIR)
+    if relative_path_for_command == ".": # 루트 디렉토리인 경우
+        command = f"find . -name '{pattern}'"
+    else:
+        command = f"find {relative_path_for_command} -name '{pattern}'"
     
     try:
-        output = _run_local_command(command, path)
+        output = _run_local_command(command) # cwd는 이미 WEBDAV_ROOT_DIR로 설정됨
         found_files = output.split('\n') if output else []
-        return json.dumps([f for f in found_files if f], ensure_ascii=False)
+        # 반환되는 경로도 WEBDAV_ROOT_DIR 기준이므로, 다시 상대 경로로 변환
+        relative_found_files = [os.path.relpath(f, start=WEBDAV_ROOT_DIR) for f in found_files]
+        return json.dumps([f for f in relative_found_files if f], ensure_ascii=False)
     except HTTPException as e:
         if "Command execution failed" in e.detail and "No such file or directory" in e.detail:
             raise HTTPException(status_code=404, detail=f"Path '{path}' not found on NAS server.")
         if "Command execution failed" in e.detail and "returned non-zero exit status 1" in e.detail:
-            return json.dumps([], ensure_ascii=False)
+            return json.dumps([], ensure_ascii=False) # 검색 결과가 없는 경우
         raise e
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error during local find_files operation: {e}")
 
 
-def _get_gitignore_patterns(repo_path: str) -> PathSpec:
+def _get_gitignore_patterns(base_path: str) -> PathSpec:
     """Fetches and parses .gitignore content from the local file system."""
-    gitignore_path = os.path.join(repo_path, ".gitignore")
+    gitignore_path = os.path.join(base_path, ".gitignore")
     try:
         with open(gitignore_path, 'r') as f:
             return PathSpec.from_lines(GitWildMatchPattern, f.readlines())
@@ -163,10 +191,12 @@ def _get_gitignore_patterns(repo_path: str) -> PathSpec:
     except Exception:
         return PathSpec.from_lines(GitWildMatchPattern, [])
 
-def _get_git_tree_info(repo_path: str, gitignore_spec: PathSpec) -> list[dict]:
+
+def _get_git_tree_info(base_path: str, gitignore_spec: PathSpec) -> list[dict]:
     """Gets Git tracked files/dirs and their last modified dates, respecting .gitignore."""
-    command = f"git -C {repo_path} ls-tree -r HEAD --name-only"
-    tracked_paths_output = _run_local_command(command, repo_path)
+    # git 명령어는 base_path 내에서 실행되도록 cwd를 명시적으로 전달
+    command = f"git ls-tree -r HEAD --name-only"
+    tracked_paths_output = _run_local_command(command, cwd=base_path)
     tracked_paths = tracked_paths_output.strip().splitlines()
 
     filtered_paths = []
@@ -176,11 +206,12 @@ def _get_git_tree_info(repo_path: str, gitignore_spec: PathSpec) -> list[dict]:
     
     file_info = []
     for p in filtered_paths:
-        date_command = f'git -C {repo_path} log -1 --format="%cd" --date=format:"%Y-%m-%d %H:%M:%S" -- "{p}"'
-        last_modified = _run_local_command(date_command, repo_path)
+        # git log 및 git ls-tree 명령어는 base_path 내에서 실행되도록 cwd를 명시적으로 전달
+        date_command = f'git log -1 --format="%cd" --date=format:"%Y-%m-%d %H:%M:%S" -- "{p}"'
+        last_modified = _run_local_command(date_command, cwd=base_path)
         
-        is_dir_command = f"git -C {repo_path} ls-tree HEAD \"{p}\""
-        is_dir_result = _run_local_command(is_dir_command, repo_path)
+        is_dir_command = f"git ls-tree HEAD \"{p}\""
+        is_dir_result = _run_local_command(is_dir_command, cwd=base_path)
         is_dir = "tree" in is_dir_result
 
         file_info.append({
@@ -246,14 +277,21 @@ async def directory_tree(
     Generates a directory tree for a Git repository on the NAS server,
     excluding .gitignore'd files and displaying last modified dates.
     """
+    full_path = os.path.join(WEBDAV_ROOT_DIR, path.lstrip('/'))
+    if not os.path.exists(full_path):
+        raise HTTPException(status_code=404, detail=f"Path '{path}' not found on NAS server.")
+    
     try:
-        git_check_command = f"git -C {path} rev-parse --is-inside-work-tree"
-        git_check_result = _run_local_command(git_check_command, path)
+        # git_check_command는 full_path에서 실행
+        git_check_command = f"git rev-parse --is-inside-work-tree"
+        git_check_result = _run_local_command(git_check_command, cwd=full_path)
         if "true" not in git_check_result:
             raise HTTPException(status_code=400, detail=f"Path '{path}' is not a Git repository or git command failed.")
 
-        gitignore_spec = _get_gitignore_patterns(path)
-        file_info = _get_git_tree_info(path, gitignore_spec)
+        # gitignore_spec은 full_path를 기준으로 생성
+        gitignore_spec = _get_gitignore_patterns(full_path)
+        # file_info는 full_path를 기준으로 Git 정보를 가져옴
+        file_info = _get_git_tree_info(full_path, gitignore_spec)
         
         return _format_tree_output(file_info, terminal_width)
     except HTTPException as e:
