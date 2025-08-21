@@ -20,7 +20,7 @@ SECRET_KEY = os.getenv("SECRET_KEY", "your-super-secret-key")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/extension/token")
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
     to_encode = data.copy()
@@ -261,7 +261,13 @@ async def directory_tree(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating Git directory tree: {e}")
 
-app = FastAPI(title="NAS Extension Server", version="1.0.0")
+app = FastAPI(
+    title="NAS Extension Server", 
+    version="1.0.0",
+    docs_url="/extension/docs",  # Swagger UI 문서 경로를 지정
+    redoc_url="/extension/redoc", # ReDoc 문서 경로를 지정
+    openapi_url="/extension/openapi.json" # OpenAPI 스키마 경로를 지정
+)
 app.include_router(router)
 
 if __name__ == "__main__":
